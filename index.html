@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>geo-tracker</title>
+  <!-- NoSleep.js CDN（フォールバック用） -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/nosleep/0.12.0/NoSleep.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 12px;
+      background: #0f172a;
+      color: #f8fafc;
+      -webkit-text-size-adjust: 100%;
+    }
+    .panel {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    .header-title {
+      font-size: 1.15rem;
+      font-weight: bold;
+      margin: 0 0 12px 0;
+      color: #f1f5f9;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+    .metric-box {
+      background: #0f172a;
+      padding: 8px 4px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+    }
+    .metric-val {
+      font-size: 1.25rem;
+      font-weight: bold;
+      color: #38bdf8;
+      font-family: monospace;
+    }
+    .metric-lbl {
+      font-size: 10px;
+      color: #94a3b8;
+    }
+    .btn-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    button {
+      height: 48px;
+      font-size: 15px;
+      font-weight: bold;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled {
+      background: #334155 !important;
+      color: #64748b !important;
+      cursor: not-allowed;
+    }
+    #startBtn { background: #0284c7; color: #fff; }
+    #stopBtn { background: #ef4444; color: #fff; }
+    #exportGpxBtn { background: #10b981; color: #fff; }
+    #exportKmlBtn { background: #f59e0b; color: #fff; }
+    .status-row {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-top: 6px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .status-active {
+      color: #22c55e;
+      font-weight: bold;
+    }
+    #log {
+      width: 100%;
+      height: 140px;
+      box-sizing: border-box;
+      background: #000;
+      color: #22c55e;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 8px;
+      border-radius: 6px;
+      overflow-y: scroll;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="panel">
+    <div class="header-title">GPS ロガー（geo-tracker）</div>
+    
+    <div class="metrics">
+      <div class="metric-box">
+        <div class="metric-val" id="metricPoints">0</div>
+        <div class="metric-lbl">記録ポイント (点)</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-val" id="metricSpeed">0.0</div>
+        <div class="metric-lbl">速度 (km/h)</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-val" id="metricAlt">0.0</div>
+        <div class="metric-lbl">高度 (m)</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-val" id="metricAccuracy">--</div>
+        <div class="metric-lbl">測位誤差 (±m)</div>
+      </div>
+    </div>
+
+    <div class="btn-group">
+      <button id="startBtn">記録開始</button>
+      <button id="stopBtn" disabled>記録停止</button>
+    </div>
+    <div class="btn-group">
+      <button id="exportGpxBtn" disabled>GPX保存</button>
+      <button id="exportKmlBtn" disabled>KML保存</button>
+    </div>
+
+    <div class="status-row">
+      <span>ステータス: <span id="statusTxt">待機中</span></span>
+      <span>常時点灯: <span id="wakeLockTxt">OFF</span></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div style="font-size: 12px; font-weight: bold; margin-bottom: 6px; color: #94a3b8;">リアルタイムログ</div>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    let watchId = null;
+    let trackPoints = [];
+    let wakeLock = null;
+    const noSleep = new NoSleep();
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const exportGpxBtn = document.getElementById('exportGpxBtn');
+    const exportKmlBtn = document.getElementById('exportKmlBtn');
+    const statusTxt = document.getElementById('statusTxt');
+    const wakeLockTxt = document.getElementById('wakeLockTxt');
+    const logDiv = document.getElementById('log');
+
+    const metricPoints = document.getElementById('metricPoints');
+    const metricSpeed = document.getElementById('metricSpeed');
+    const metricAlt = document.getElementById('metricAlt');
+    const metricAccuracy = document.getElementById('metricAccuracy');
+
+    // スリープ抑止の有効化
+    async function enableWakeLock() {
+      // 1. ネイティブ Screen Wake Lock API
+      if ('wakeLock' in navigator) {
+        try {
+          wakeLock = await navigator.wakeLock.request('screen');
+          wakeLockTxt.textContent = 'ON (Native)';
+          wakeLockTxt.className = 'status-active';
+          wakeLock.addEventListener('release', () => {
+            if (watchId !== null) {
+              wakeLockTxt.textContent = '解除 (再取得中)';
+            }
+          });
+          return;
+        } catch (err) {
+          console.warn('Screen Wake Lock error:', err);
+        }
+      }
+      // 2. フォールバック: NoSleep.js (ダミー動画ループ)
+      try {
+        noSleep.enable();
+        wakeLockTxt.textContent = 'ON (NoSleep)';
+        wakeLockTxt.className = 'status-active';
+      } catch (err) {
+        console.error('NoSleep error:', err);
+        wakeLockTxt.textContent = '無効';
+      }
+    }
+
+    // スリープ抑止の無効化
+    function disableWakeLock() {
+      if (wakeLock !== null) {
+        wakeLock.release().then(() => {
+          wakeLock = null;
+        });
+      }
+      noSleep.disable();
+      wakeLockTxt.textContent = 'OFF';
+      wakeLockTxt.className = '';
+    }
+
+    // 画面復帰時の再ロック設定（ネイティブAPI対策）
+    document.addEventListener('visibilitychange', async () => {
+      if (wakeLock !== null && document.visibilityState === 'visible' && watchId !== null) {
+        await enableWakeLock();
+      }
+    });
+
+    // 記録開始
+    startBtn.addEventListener('click', async () => {
+      if (!navigator.geolocation) {
+        alert('Geolocation API非対応です');
+        return;
+      }
+
+      await enableWakeLock();
+
+      trackPoints = [];
+      logDiv.textContent = '';
+      
+      const options = {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0
+      };
+
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          const ele = pos.coords.altitude || 0;
+          const speedKmh = pos.coords.speed ? (pos.coords.speed * 3.6).toFixed(1) : '0.0';
+          const accuracy = pos.coords.accuracy ? pos.coords.accuracy.toFixed(0) : '--';
+          const isoTime = new Date(pos.timestamp).toISOString();
+
+          trackPoints.push({ lat, lon, ele, time: isoTime, speed: pos.coords.speed || 0 });
+
+          metricPoints.textContent = trackPoints.length;
+          metricSpeed.textContent = speedKmh;
+          metricAlt.textContent = ele.toFixed(1);
+          metricAccuracy.textContent = accuracy;
+
+          statusTxt.textContent = '測位中';
+          statusTxt.className = 'status-active';
+
+          const timeStr = isoTime.substring(11, 19);
+          logDiv.textContent = `[${timeStr}] 緯:${lat.toFixed(5)} 経:${lon.toFixed(5)} 高:${ele.toFixed(0)}m 誤:±${accuracy}m\n` + logDiv.textContent;
+        },
+        (err) => {
+          statusTxt.textContent = `エラー (${err.code})`;
+          statusTxt.className = '';
+        },
+        options
+      );
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      exportGpxBtn.disabled = true;
+      exportKmlBtn.disabled = true;
+    });
+
+    // 記録停止
+    stopBtn.addEventListener('click', () => {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      disableWakeLock();
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+
+      const hasPoints = trackPoints.length > 0;
+      exportGpxBtn.disabled = !hasPoints;
+      exportKmlBtn.disabled = !hasPoints;
+
+      statusTxt.textContent = '停止中';
+      statusTxt.className = '';
+    });
+
+    // GPX 保存
+    exportGpxBtn.addEventListener('click', () => {
+      if (trackPoints.length === 0) return;
+      const header = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="geo-tracker" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>Track_${Date.now()}</name>
+    <trkseg>\n`;
+      const body = trackPoints.map(pt => 
+        `      <trkpt lat="${pt.lat}" lon="${pt.lon}"><ele>${pt.ele}</ele><time>${pt.time}</time></trkpt>`
+      ).join('\n');
+      const footer = `\n    </trkseg>\n  </trk>\n</gpx>`;
+      downloadFile(header + body + footer, `track_${formatDate(new Date())}.gpx`, 'application/gpx+xml');
+    });
+
+    // KML 保存
+    exportKmlBtn.addEventListener('click', () => {
+      if (trackPoints.length === 0) return;
+      const coordinatesStr = trackPoints.map(pt => `${pt.lon},${pt.lat},${pt.ele}`).join(' ');
+      const kmlContent = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Track_${Date.now()}</name>
+    <Style id="routePath"><LineStyle><color>ff0000ff</color><width>4</width></LineStyle></Style>
+    <Placemark>
+      <name>Path</name>
+      <styleUrl>#routePath</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>clampToGround</altitudeMode><coordinates>${coordinatesStr}</coordinates></LineString>
+    </Placemark>
+  </Document>
+</kml>`;
+      downloadFile(kmlContent, `track_${formatDate(new Date())}.kml`, 'application/vnd.google-earth.kml+xml');
+    });
+
+    function downloadFile(content, filename, mimeType) {
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function formatDate(d) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    }
+  </script>
+</body>
+</html>
