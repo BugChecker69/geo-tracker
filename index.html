@@ -151,6 +151,51 @@
     let wakeLock = null;
     const noSleep = new NoSleep();
 
+    // ====== バックグラウンド維持用（無音Web Audio） ======
+    let audioCtx = null;
+    let silenceOscillator = null;
+
+    function startBackgroundKeepAlive() {
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume();
+        }
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        // 完全な無音に設定
+        gain.gain.value = 0.00001;
+        osc.frequency.value = 440;
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        silenceOscillator = osc;
+      } catch (e) {
+        console.error('Keep-alive error:', e);
+      }
+    }
+
+    function stopBackgroundKeepAlive() {
+      if (silenceOscillator) {
+        try {
+          silenceOscillator.stop();
+          silenceOscillator.disconnect();
+        } catch (e) {}
+        silenceOscillator = null;
+      }
+      if (audioCtx) {
+        try {
+          audioCtx.close();
+        } catch (e) {}
+        audioCtx = null;
+      }
+    }
+    // ======================================================
+
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const exportGpxBtn = document.getElementById('exportGpxBtn');
@@ -220,6 +265,7 @@
       }
 
       await enableWakeLock();
+      startBackgroundKeepAlive();
 
       trackPoints = [];
       logDiv.textContent = '';
@@ -272,6 +318,7 @@
         watchId = null;
       }
       disableWakeLock();
+      stopBackgroundKeepAlive();
 
       startBtn.disabled = false;
       stopBtn.disabled = true;
